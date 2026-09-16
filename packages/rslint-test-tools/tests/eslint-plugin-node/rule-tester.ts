@@ -10,6 +10,7 @@ interface ExpectedError {
   column: number;
   endLine: number;
   endColumn: number;
+  fix?: { range: [number, number]; text: string };
 }
 
 interface LanguageOptions {
@@ -134,7 +135,17 @@ export class RuleTester {
                   start: { line: expected.line, column: expected.column },
                   end: { line: expected.endLine, column: expected.endColumn },
                 });
-                expect(diagnostic.fixes).toBeUndefined();
+                if (expected.fix) {
+                  expect(diagnostic.fixes).toEqual([
+                    {
+                      startPos: expected.fix.range[0],
+                      endPos: expected.fix.range[1],
+                      text: expected.fix.text,
+                    },
+                  ]);
+                } else {
+                  expect(diagnostic.fixes).toBeUndefined();
+                }
                 continue;
               }
               // Hashbang's upstream string expectations describe a fix on
