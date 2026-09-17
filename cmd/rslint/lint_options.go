@@ -39,6 +39,13 @@ type lintArgs struct {
 	MaxWarnings int
 	StartTimeMs int64
 	RuleFlags   []string
+	// Cache enables the persistent per-file lint result cache
+	// (.rslintcache). It has no effect for --fix and --type-check(-only),
+	// which always run fresh.
+	Cache bool
+	// CacheLocation overrides the cache file path (or directory, per ESLint's
+	// --cache-location semantics); it never enables caching on its own.
+	CacheLocation string
 	// Positional args resolved into existing-dir vs file paths.
 	AllowFiles []string
 	AllowDirs  []string
@@ -90,6 +97,8 @@ Options:
   --timing [all|N]      Print a per-rule timing table (all rules, or top N)
   --max-warnings Int    Number of warnings to trigger nonzero exit code
   --rule RULE           Rule override, e.g. 'no-console: error' (repeatable)
+  --cache               Reuse unchanged lint results from a persistent cache
+  --cache-location PATH Cache file path, or a directory containing .rslintcache
   -h, --help            Show help
 `
 
@@ -136,6 +145,8 @@ func parseLintFlags(argv []string) (args lintArgs, help bool, fatalExitCode int)
 	fs.BoolVar(&args.Quiet, "quiet", false, "report errors only")
 	var timingValue string
 	fs.StringVar(&timingValue, "timing", "", "print a per-rule timing table: 'all' or a top rule count")
+	fs.BoolVar(&args.Cache, "cache", false, "store/reuse lint results in a persistent cache (default: ./.rslintcache); no effect with --fix or --type-check")
+	fs.StringVar(&args.CacheLocation, "cache-location", "", "path to the cache file or directory (use with --cache)")
 	fs.IntVar(&args.MaxWarnings, "max-warnings", -1, "Number of warnings to trigger nonzero exit code")
 
 	fs.StringVar(&args.TraceOut, "trace", "", "file to put trace to")

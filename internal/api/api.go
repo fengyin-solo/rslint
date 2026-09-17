@@ -120,6 +120,15 @@ type LintRequest struct {
 	// final post-fix generation.
 	Fix                       bool `json:"fix,omitempty"`
 	IncludeEncodedSourceFiles bool `json:"includeEncodedSourceFiles,omitempty"` // Whether to include encoded source files in response
+	// Cache enables the persistent per-file lint result cache for this
+	// request. It has no effect when Fix is true (fix runs never read or
+	// write results). Entries are reused only when target content, effective
+	// config/ignores, and the bound program universe are all unchanged.
+	Cache bool `json:"cache,omitempty"`
+	// CacheLocation overrides the cache file path (or directory, per ESLint's
+	// --cache-location semantics); relative paths resolve against
+	// WorkingDirectory. It never enables caching by itself.
+	CacheLocation string `json:"cacheLocation,omitempty"`
 }
 
 // ConfigDiscoveryRequest is the API-facing scope for Go's shared staged

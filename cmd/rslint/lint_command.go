@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -10,7 +11,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/microsoft/TypeScript/tsc/shim/ast"
 	"github.com/microsoft/TypeScript/tsc/shim/bundled"
 	"github.com/microsoft/TypeScript/tsc/shim/tspath"
 	"github.com/microsoft/TypeScript/tsc/shim/vfs"
@@ -23,6 +23,7 @@ import (
 	"github.com/web-infra-dev/rslint/internal/output"
 	"github.com/web-infra-dev/rslint/internal/program"
 	"github.com/web-infra-dev/rslint/internal/program/loader"
+	"github.com/web-infra-dev/rslint/internal/resultcache"
 	"github.com/web-infra-dev/rslint/internal/rule"
 	"github.com/web-infra-dev/rslint/internal/rules"
 	"github.com/web-infra-dev/rslint/internal/term"
@@ -272,6 +273,11 @@ func handleLintCommand(args lintArgs, ctx context.Context, dispatch linter.Eslin
 		return 1
 	}
 
+	// The persistent result cache is opt-in and silently inactive for
+	// --fix/--type-check; openLintResultCache returns nil in every bypass.
+	cacheStore := openLintResultCache(args, currentDirectory)
+	defer func() { _ = cacheStore.Close() }()
+
 	outputOptions := output.Options{
 		Format:       format,
 		Quiet:        quiet,
@@ -459,56 +465,40 @@ func handleLintCommand(args lintArgs, ctx context.Context, dispatch linter.Eslin
 		binding loader.LoadResult,
 		generationFS vfs.FS,
 	) linter.Generation {
-		var fileConfigResolver *configLint.Resolver
-		var rulesForFile linter.RuleHandler
-		if !typeCheckOnly {
-			fileConfigResolver = configResolver.WithSourceMappings(binding.LintTargetBySourcePath, generationFS, true)
-			rulesForFile = func(sourceFile *ast.SourceFile) []rule.ConfiguredRule {
-				return fileConfigResolver.EnabledRulesForSourcePath(sourceFile.FileName())
-			}
-		}
-		targetPath := func(sourcePath string) string {
-			if lintTarget, ok := target.LookupSourceTarget(binding.LintTargetBySourcePath, sourcePath, generationFS); ok {
-				return lintTarget.Path
-			}
-			return sourcePath
-		}
-		var plugin *linter.PluginGeneration
-		if hasEslintPlugins {
-			plugin = &linter.PluginGeneration{
-				ConfigForFile: eslintPluginConfigResolver{
-					lintResolver: fileConfigResolver,
-				}.resolve,
-				HostReadsInitialText: pluginHostReadsInitialText,
-			}
-		}
-		return linter.Generation{
-			Native: linter.NativeGeneration{
-				Programs:         binding.Programs,
-				TargetsByProgram: binding.TargetsByProgram,
-				RulesForFile:     rulesForFile,
-				Cwd:              cwd,
-				TypeCheck:        typeCheck,
-				SingleThreaded:   singleThreaded,
-				Timing:           timingCollector,
-			},
-			Target: linter.TargetProjection{
-				Path: targetPath,
-				ReadText: func(path string, source ast.SourceFileLike) (string, error) {
-					return utils.RestoreSourceBOM(generationFS, path, source.Text()), nil
-				},
-			},
-			Plugin: plugin,
-		}
+		return cliGenerationForBinding(
+			binding, generationFS, configResolver, cwd,
+			typeCheck, singleThreaded, timingCollector,
+			!typeCheckOnly, hasEslintPlugins, pluginHostReadsInitialText,
+		)
 	}
 
 	initialBinding := loadedPrograms
 	if typeCheckOnly {
 		initialBinding = loader.LoadResult{Programs: programs}
 	}
+	// Persistent result cache: decide hits from the initial disk-backed
+	// generation and run only the misses through the pipeline. Fix/type-check
+	// invocations never reach this (cacheStore is nil).
+	var cachePlan *resultcache.Plan
+	var filteredInitialGeneration *linter.Generation
+	if cacheStore != nil {
+		plan, cacheErr := buildCachePlan(
+			cacheStore, initialBinding, programSession.FS(),
+			configResolver, configMap, rslintConfig,
+			cwd, hasEslintPlugins, singleThreaded, timingCollector,
+			pluginHostReadsInitialText,
+		)
+		if cacheErr != nil {
+			return abortRun("preparing lint result cache", fmt.Sprintf("error preparing lint result cache: %v", cacheErr))
+		}
+		cachePlan = plan
+		filtered := plan.FilteredGeneration()
+		filteredInitialGeneration = &filtered
+	}
 	provider := &cliGenerationProvider{
-		initial:   initialBinding,
-		initialFS: programSession.FS(),
+		initial:           initialBinding,
+		initialFS:         programSession.FS(),
+		initialGeneration: filteredInitialGeneration,
 		rebuild: func(ctx context.Context, snapshot linter.SourceSnapshot) (loader.LoadResult, vfs.FS, error) {
 			if err := ctx.Err(); err != nil {
 				return loader.LoadResult{}, nil, err
@@ -563,7 +553,11 @@ func handleLintCommand(args lintArgs, ctx context.Context, dispatch linter.Eslin
 		pipelineRequest = linter.NewLintRequest(provider, observationPolicy, dispatch)
 	}
 	pipelineResult, err := linter.RunPipeline(ctx, pipelineRequest)
+	pluginDispatchFailed := false
 	for _, pluginRecord := range pipelineResult.PluginOutcomes() {
+		if pluginRecord.DispatchError != nil {
+			pluginDispatchFailed = true
+		}
 		reportEslintPluginDispatchOutcome(linter.EslintPluginDispatchOutcome{
 			Notices:       pluginRecord.Notices,
 			DispatchError: pluginRecord.DispatchError,
@@ -577,6 +571,17 @@ func handleLintCommand(args lintArgs, ctx context.Context, dispatch linter.Eslin
 			reason = operation + ": " + reason
 		}
 		return abortRun(reason, fmt.Sprintf("error %s: %v", operation, err))
+	}
+	// Replay cached hit diagnostics into the observation before any report
+	// projection. A replay failure means we cannot prove completeness: abort
+	// rather than emit a partial result.
+	var replayedRuleNames []string
+	if cachePlan != nil {
+		replay, replayErr := cachePlan.Replay(&pipelineResult.Observation)
+		if replayErr != nil {
+			return abortRun("reusing lint result cache", fmt.Sprintf("error reusing lint result cache: %v", replayErr))
+		}
+		replayedRuleNames = replay.RuleNames
 	}
 	allDiags, complete := pipelineResult.Observation.CompleteDiagnostics()
 	if !complete {
@@ -594,6 +599,9 @@ func handleLintCommand(args lintArgs, ctx context.Context, dispatch linter.Eslin
 	}
 	lintedfileCount := initialObservation.Native.Lint.LintedFileCount
 	lintResult.ExecutedRules = pipelineResult.ExecutedRules()
+	for _, ruleName := range replayedRuleNames {
+		lintResult.ExecutedRules[ruleName] = struct{}{}
+	}
 
 	// Emit per-file warnings for CLI-specified files that won't be linted.
 	// Distinguishes "not found on disk" vs "ignored by pattern", aligned
@@ -617,6 +625,16 @@ func handleLintCommand(args lintArgs, ctx context.Context, dispatch linter.Eslin
 	// Sort the completed set before rendering; same-start diagnostics retain
 	// emission order.
 	linter.StableSortDiagnosticsByFileAndStart(allDiags)
+
+	// Persist this run's miss results. A failed plugin dispatch can inject
+	// synthetic/transient diagnostics, so in that case write nothing. Read-
+	// only/unwritable locations already warned inside the store and return
+	// ErrReadOnly; surface only unexpected failures.
+	if cachePlan != nil && !pluginDispatchFailed {
+		if cacheErr := cachePlan.Commit(allDiags); cacheErr != nil && !errors.Is(cacheErr, resultcache.ErrReadOnly) {
+			fmt.Fprintf(os.Stderr, "warning: failed to update rslint result cache: %v\n", cacheErr)
+		}
+	}
 
 	// Phase 3: Project the completed core result into one immutable CLI report.
 	// Machine formats deliberately omit Summary and its upstream identity work.

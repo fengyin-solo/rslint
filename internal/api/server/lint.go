@@ -22,6 +22,7 @@ import (
 	"github.com/web-infra-dev/rslint/internal/config/target"
 	"github.com/web-infra-dev/rslint/internal/linter"
 	"github.com/web-infra-dev/rslint/internal/program/loader"
+	"github.com/web-infra-dev/rslint/internal/resultcache"
 	"github.com/web-infra-dev/rslint/internal/rule"
 	"github.com/web-infra-dev/rslint/internal/rules"
 	"github.com/web-infra-dev/rslint/internal/utils"
@@ -397,42 +398,31 @@ func (h *Handler) handleLint(ctx context.Context, req api.LintRequest, dispatch 
 	}
 	generationForBinding := func(binding loader.LoadResult, generationFS vfs.FS) linter.Generation {
 		fileConfigResolver := configResolver.WithSourceMappings(binding.LintTargetBySourcePath, generationFS, true)
-		targetPathForSourcePath := func(sourcePath string) string {
-			if lintTarget, bound := fileConfigResolver.TargetForSourcePath(sourcePath); bound {
-				return lintTarget.Path
-			}
-			return sourcePath
-		}
-		var plugin *linter.PluginGeneration
-		if len(pluginEntries) > 0 {
-			plugin = &linter.PluginGeneration{
-				ConfigForFile: eslintPluginConfigResolver{
-					lintResolver:           fileConfigResolver,
-					pluginConfigKeyByOwner: pluginConfigKeyByOwner,
-				}.resolve,
-			}
-		}
-		return linter.Generation{
-			Native: linter.NativeGeneration{
-				Programs:         binding.Programs,
-				TargetsByProgram: binding.TargetsByProgram,
-				SingleThreaded:   false, // Don't use single-threaded mode for IPC
-				Cwd:              currentDirectory,
-				RulesForFile: func(sourceFile *ast.SourceFile) []rule.ConfiguredRule {
-					return fileConfigResolver.EnabledRulesForSourcePath(sourceFile.FileName())
-				},
-			},
-			Target: linter.TargetProjection{
-				Path: targetPathForSourcePath,
-				ReadText: func(path string, source ast.SourceFileLike) (string, error) {
-					return utils.RestoreSourceBOM(generationFS, path, source.Text()), nil
-				},
-			},
-			Plugin: plugin,
-		}
+		return apiGenerationForBinding(
+			binding, generationFS, fileConfigResolver, currentDirectory,
+			pluginEntries, pluginConfigKeyByOwner,
+		)
+	}
+	// Optional persistent result cache. Fix requests are bypassed inside
+	// openLintCache; the API never runs the TypeScript semantic phase. Only
+	// targets whose bytes actually came from disk may participate.
+	cacheStore := openLintCache(req, currentDirectory)
+	defer func() { _ = cacheStore.Close() }()
+	nonCacheable := nonCacheableTargetIDs(fileContents, sourceFS)
+	cachePlan, filteredGeneration, cacheErr := buildAPICachePlan(
+		cacheStore, binding, programSession.FS(),
+		configResolver, configMap, rslintConfig, currentDirectory,
+		pluginEntries, pluginConfigKeyByOwner, nonCacheable,
+	)
+	if cacheErr != nil {
+		return nil, fmt.Errorf("error preparing lint result cache: %w", cacheErr)
+	}
+	initialGeneration := generationForBinding(binding, programSession.FS())
+	if cachePlan != nil {
+		initialGeneration = filteredGeneration
 	}
 	provider := &apiGenerationProvider{
-		initial: generationForBinding(binding, programSession.FS()),
+		initial: initialGeneration,
 		rebuild: func(ctx context.Context, snapshot linter.SourceSnapshot) (linter.Generation, error) {
 			if err := ctx.Err(); err != nil {
 				return linter.Generation{}, err
@@ -479,7 +469,11 @@ func (h *Handler) handleLint(ctx context.Context, req api.LintRequest, dispatch 
 		pipelineRequest = linter.NewLintRequest(provider, policy, dispatch)
 	}
 	pipelineResult, err := linter.RunPipeline(ctx, pipelineRequest)
+	pluginDispatchFailed := false
 	for _, pluginRecord := range pipelineResult.PluginOutcomes() {
+		if pluginRecord.DispatchError != nil {
+			pluginDispatchFailed = true
+		}
 		reportEslintPluginDispatchOutcome(linter.EslintPluginDispatchOutcome{
 			Notices:       pluginRecord.Notices,
 			DispatchError: pluginRecord.DispatchError,
@@ -488,11 +482,42 @@ func (h *Handler) handleLint(ctx context.Context, req api.LintRequest, dispatch 
 	if err != nil {
 		return nil, fmt.Errorf("error running linter: %w", err)
 	}
+	// Replay cached hit diagnostics/files/rule names before any projection.
+	if cachePlan != nil {
+		replay, replayErr := cachePlan.Replay(&pipelineResult.Observation)
+		if replayErr != nil {
+			return nil, fmt.Errorf("error reusing lint result cache: %w", replayErr)
+		}
+		for _, replayedFile := range replay.Files {
+			pipelineResult.Observation.Native.Files = append(
+				pipelineResult.Observation.Native.Files,
+				linter.LintedFile{Path: replayedFile.TargetPath, SourceFile: replayedFile.SourceFile},
+			)
+		}
+		if lint := pipelineResult.Observation.Native.Lint; lint != nil {
+			if lint.ExecutedRules == nil {
+				lint.ExecutedRules = map[string]struct{}{}
+			}
+			for _, ruleName := range replay.RuleNames {
+				lint.ExecutedRules[ruleName] = struct{}{}
+			}
+		}
+	}
 	diagnostics, complete := pipelineResult.Observation.CompleteDiagnostics()
 	if !complete {
 		return nil, errors.New("error running linter: API lint returned an incomplete observation")
 	}
 	lintResult := pipelineResult.Observation.Native.Lint
+
+	// Persist this observation's miss results before diagnostics leave the
+	// stable target path space. Dispatch failures can inject synthetic
+	// diagnostics, so never store anything in that case. Unwritable caches
+	// warn inside the store and surface as ErrReadOnly.
+	if cachePlan != nil && !pluginDispatchFailed {
+		if cacheErr := cachePlan.Commit(diagnostics); cacheErr != nil && !errors.Is(cacheErr, resultcache.ErrReadOnly) {
+			fmt.Fprintf(os.Stderr, "warning: failed to update rslint result cache: %v\n", cacheErr)
+		}
+	}
 
 	// The shared result uses absolute stable target identities. Copy it into the
 	// API's caller-visible relative path space only after all producers joined.

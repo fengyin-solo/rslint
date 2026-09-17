@@ -18,6 +18,10 @@ type cliGenerationProvider struct {
 	initialFS  vfs.FS
 	rebuild    func(context.Context, linter.SourceSnapshot) (loader.LoadResult, vfs.FS, error)
 	generation func(loader.LoadResult, vfs.FS) linter.Generation
+	// initialGeneration, when non-nil, replaces the generated initial
+	// generation. The result-cache gate uses it to serve a generation whose
+	// targets exclude cache hits.
+	initialGeneration *linter.Generation
 }
 
 func (p *cliGenerationProvider) AcquireGeneration(
@@ -31,6 +35,9 @@ func (p *cliGenerationProvider) AcquireGeneration(
 		return linter.Generation{}, nil, errors.New("CLI lint generation provider is not configured")
 	}
 	if snapshot.Empty() {
+		if p.initialGeneration != nil {
+			return *p.initialGeneration, nil, nil
+		}
 		return p.generation(p.initial, p.initialFS), nil, nil
 	}
 	if p.rebuild == nil {
