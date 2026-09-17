@@ -4,6 +4,8 @@ import {
   isOutputFormat,
   parseArgs,
 } from '../src/utils/args.js';
+import { validateWatchArgs } from '../src/cli/cli.js';
+import { parseRuleOverrides } from '../src/cli/watch/run-watch.js';
 
 describe('isJSConfigFile', () => {
   test('returns true for .js', () => {
@@ -425,5 +427,64 @@ describe('parseArgs option-terminator (--)', () => {
       'src/b.ts',
     ]);
     expect(result.positionals).toEqual(['src/a.ts', '--', 'src/b.ts']);
+  });
+});
+
+describe('watch flags', () => {
+  test('watch-family flags parse while still forwarding to Go in rest', () => {
+    const result = parseArgs(['--watch', '--fix', '--quiet', 'src']);
+    expect(result.watch).toBe(true);
+    expect(result.fix).toBe(true);
+    expect(result.quiet).toBe(true);
+    expect(result.positionals).toEqual(['src']);
+    // The one-shot Go path still receives every flag verbatim.
+    expect(result.rest).toContain('--watch');
+    expect(result.rest).toContain('--fix');
+    expect(result.rest).toContain('--quiet');
+  });
+
+  test('type-check and color flags parse', () => {
+    const result = parseArgs([
+      '--watch',
+      '--type-check',
+      '--no-color',
+      '--max-warnings',
+      '0',
+    ]);
+    expect(result.typeCheck).toBe(true);
+    expect(result.noColor).toBe(true);
+    expect(result.maxWarnings).toBe('0');
+  });
+
+  test('validateWatchArgs rejects unsupported combinations', () => {
+    expect(validateWatchArgs({ typeCheck: true, rest: [] })).toMatch(
+      /--type-check/,
+    );
+    expect(validateWatchArgs({ typeCheckOnly: true, rest: [] })).toMatch(
+      /type-check/,
+    );
+    expect(validateWatchArgs({ format: 'jsonline', rest: [] })).toMatch(
+      /default output format/,
+    );
+    expect(
+      validateWatchArgs({ format: null, rest: ['--timing', 'all'] }),
+    ).toMatch(/--timing/);
+    expect(validateWatchArgs({ format: null, rest: ['--trace', 'x'] })).toMatch(
+      /--trace/,
+    );
+    expect(validateWatchArgs({ format: 'default', rest: [] })).toBeNull();
+  });
+
+  test('parseRuleOverrides mirrors Go --rule syntax', () => {
+    expect(parseRuleOverrides(['no-console: error', 'eqeqeq: warn'])).toEqual({
+      'no-console': 'error',
+      eqeqeq: 'warn',
+    });
+    expect(
+      parseRuleOverrides(['no-console: ["error", {"allow": ["warn"]}]']),
+    ).toEqual({ 'no-console': ['error', { allow: ['warn'] }] });
+    expect(() => parseRuleOverrides(['no-console'])).toThrow(/invalid --rule/);
+    expect(() => parseRuleOverrides([': error'])).toThrow(/invalid --rule/);
+    expect(() => parseRuleOverrides(['x: [not json'])).toThrow(/JSON array/);
   });
 });

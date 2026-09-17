@@ -65,6 +65,14 @@ func resolveStartTime(startTimeMs int64) time.Time {
 // config/targets/Programs, delegates lint execution to linter.RunPipeline, and
 // projects the result to the selected output format.
 func handleLintCommand(args lintArgs, ctx context.Context, dispatch linter.EslintPluginDispatcher) (exitCode int) {
+	// Watch mode is owned by the Node CLI host, which drives the persistent
+	// --api service through file-change rounds. The one-shot IPC lint pipeline
+	// below never runs it; reaching this point means the Go binary was invoked
+	// directly instead of through the rslint Node CLI.
+	if args.Watch {
+		fmt.Fprintln(os.Stderr, "rslint: --watch is only available through the rslint Node CLI")
+		return 2
+	}
 	completeActivation := args.CompleteConfigActivation
 	// Even a preflight/Program error must observe preparation failure and join
 	// the pending transaction. Cancellation is still owned by the IPC adapter.

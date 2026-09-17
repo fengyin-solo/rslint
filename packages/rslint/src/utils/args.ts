@@ -27,6 +27,16 @@ export function parseArgs(argv: string[]) {
       config: { type: 'string', short: 'c' },
       init: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
+      // Watch is intercepted by the JS host (it orchestrates the persistent
+      // --api service). It stays registered so it still reaches Go in `rest`
+      // for --help parity; the Go one-shot path defensively rejects it.
+      watch: { type: 'boolean' },
+      fix: { type: 'boolean' },
+      quiet: { type: 'boolean' },
+      'type-check': { type: 'boolean' },
+      'type-check-only': { type: 'boolean' },
+      'no-color': { type: 'boolean' },
+      'force-color': { type: 'boolean' },
       // Detected so the JS host can size the ESLint-plugin worker pool to a
       // single worker. NOT skipped below, so it still forwards to Go in
       // `rest` (Go's native pass honors the same flag independently).
@@ -106,9 +116,25 @@ export function parseArgs(argv: string[]) {
     // rslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
     help: (values.help as boolean) ?? false,
     // rslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+    watch: (values.watch as boolean) ?? false,
+    // rslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+    fix: (values.fix as boolean) ?? false,
+    // rslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+    quiet: (values.quiet as boolean) ?? false,
+    // rslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+    typeCheck: (values['type-check'] as boolean) ?? false,
+    // rslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+    typeCheckOnly: (values['type-check-only'] as boolean) ?? false,
+    // rslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+    noColor: (values['no-color'] as boolean) ?? false,
+    // rslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+    forceColor: (values['force-color'] as boolean) ?? false,
+    // rslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
     singleThreaded: (values.singleThreaded as boolean) ?? false,
     // rslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
     format: (values.format as string) ?? null,
+    // rslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+    maxWarnings: (values['max-warnings'] as string) ?? null,
     rest,
     positionals,
   };

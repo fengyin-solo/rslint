@@ -13,6 +13,7 @@ rslint [options] [files/directories...]
 | `--init`              | Generate a default config file, or migrate an existing JSON config to JS/TS                    |
 | `-c, --config <path>` | Specify which JS/TS module config file to use                                                  |
 | `--fix`               | Automatically fix problems                                                                     |
+| `--watch`             | Keep running and re-check affected files on change ([details](#watch-mode))                    |
 | `--type-check`        | Enable TypeScript semantic type checking ([details](/guide/type-checking))                     |
 | `--type-check-only`   | Run TypeScript semantic type checking without lint rules ([details](/guide/type-checking))     |
 | `--format <format>`   | Output format: `default`, `jsonline`, `github`, or `gitlab` ([details](/guide/output-formats)) |
@@ -129,6 +130,39 @@ no-control-regex                        | native |     102.9 |   842 |     2.7%
 
 The table is written to stderr, so machine-readable output formats such as `jsonline` stay parseable. Files are linted by parallel workers, so summed rule time can exceed the run's wall-clock time. With `--fix`, times accumulate across all re-lint passes. Rules executed through the ESLint plugin compatibility layer are included: their time is measured inside the Node.js worker (rule `create` plus listener invocations), excluding parse and IPC overhead.
 
+## Watch Mode
+
+`--watch` keeps rslint running and re-checks the project whenever files change:
+
+```bash
+rslint --watch
+rslint --watch src/
+rslint --watch --fix
+```
+
+- **Initial run** — watch mode starts with a full check of the requested scope (the current directory by default), exactly like a one-shot run.
+- **File changes** — editing a file re-checks only that file; creating a file admits it, deleting or renaming a file removes it, and ignoring a file drops it. All other files keep their previous diagnostics.
+- **Config and ignore changes** — editing an `rslint.config.*` module, a local module it imports/extends, or a `.gitignore` re-parses the configuration and re-checks the full scope.
+- **Output is append-only** — the screen is never cleared. Every round prints a round header, the diagnostics found in the files rechecked during that round, and a cumulative footer with the problems still remaining and the round's delta. Diagnostics printed by earlier rounds stay visible in the scrollback.
+- Events are debounced and batched, so saving several files at once produces one round.
+
+### `--watch --fix`
+
+Fixes are applied **once per round** to the files checked by that round and written to disk. The watcher ignores the file events produced by its own fix writes, and the round result already reflects the post-fix verification, so a fix round never re-triggers itself in a loop. Editing a fixed file again simply starts a normal new round.
+
+### Unsupported combinations
+
+Watch mode only supports the default output format and is rejected with exit code `2` together with `--type-check`, `--type-check-only`, `--format jsonline|github|gitlab`, `--timing`, `--trace`, or `--cpuprof`. `--quiet`, `--max-warnings`, `--rule`, and `-c/--config` work as in a one-shot run.
+
+### Stopping and exit code
+
+Send `SIGINT` (Ctrl-C), `SIGTERM`, or `SIGHUP` to stop: rslint finishes the round already in progress, closes its resident lint service, and exits with the **latest round's** result code — `0` when the current results are clean, `1` when errors remain (or warnings exceed `--max-warnings`). No background processes are left running.
+
+| Variable                   | Default | Effect                                            |
+| -------------------------- | ------- | ------------------------------------------------- |
+| `RSLINT_WATCH_DEBOUNCE_MS` | `100`   | Quiet period before a batch of changes is checked |
+| `RSLINT_WATCH_POLL_MS`     | `1000`  | Safety-poll interval; `0` disables polling        |
+
 ## Exit Codes
 
 | Code | Meaning                                           |
@@ -136,3 +170,5 @@ The table is written to stderr, so machine-readable output formats such as `json
 | `0`  | No errors (warnings may be present)               |
 | `1`  | Errors found, or warnings exceed `--max-warnings` |
 | `2`  | Invalid command-line usage or flag combinations   |
+
+In watch mode the process keeps running between rounds; on shutdown (see [Watch Mode](#watch-mode)) the exit code reflects the latest round.

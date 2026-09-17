@@ -20,6 +20,7 @@ import (
 type lintArgs struct {
 	Init           bool
 	Fix            bool
+	Watch          bool
 	TypeCheck      bool
 	TypeCheckOnly  bool
 	TraceOut       string
@@ -82,6 +83,7 @@ Options:
   -c, --config PATH     Which JS/TS module config file to use.
   --format FORMAT       Output format: default | jsonline | github | gitlab
   --fix                 Automatically fix problems
+  --watch               Watch for file changes and re-check affected files
   --type-check          Enable TypeScript type checking
   --type-check-only     Run only TypeScript type checking (skip all lint rules)
   --no-color            Disable colored output
@@ -127,6 +129,7 @@ func parseLintFlags(argv []string) (args lintArgs, help bool, fatalExitCode int)
 	fs.StringVar(&args.Format, "format", "default", "output format")
 	fs.BoolVar(&args.Init, "init", false, "initialize a default config in the current directory")
 	fs.BoolVar(&args.Fix, "fix", false, "automatically fix problems")
+	fs.BoolVar(&args.Watch, "watch", false, "watch for file changes and re-check affected files")
 	fs.BoolVar(&args.TypeCheck, "type-check", false, "enable TypeScript type checking")
 	fs.BoolVar(&args.TypeCheckOnly, "type-check-only", false, "run only TypeScript type checking (skip all lint rules)")
 	fs.BoolVar(&help, "help", false, "show help")
