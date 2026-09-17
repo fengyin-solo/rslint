@@ -94,6 +94,50 @@ type Diagnostic struct {
 	Source       *DiagnosticSource
 	Severity     Severity
 	PreFormatted bool
+	// Fixes is empty for a diagnostic that offers no autofix. Every entry is
+	// one replacement over a half-open UTF-8 byte range with its replacement
+	// text. Machine formats that render fixes (for example SARIF) consume it;
+	// the other formatters ignore it.
+	Fixes []Fix
+}
+
+// Fix is one replacement edit attached to a Diagnostic. Range is a half-open
+// interval of UTF-8 byte offsets in the source text; NewText replaces it (an
+// empty string means deletion).
+type Fix struct {
+	Range   TextRange
+	NewText string
+}
+
+// RuleInfo is the presentation projection of one rule's tool metadata. It is
+// output-owned: the command layer projects rule-framework metadata into it
+// before rendering.
+type RuleInfo struct {
+	Name        string
+	Description string
+	// HelpURI links the rule's human-readable documentation. It may be empty
+	// when no documentation is known.
+	HelpURI string
+	// DefaultLevel is the rule's level in the run's resolved configuration
+	// (error/warn); the SARIF driver exposes it as defaultConfiguration.level.
+	DefaultLevel Severity
+}
+
+// Suppression locates the inline disable directive that suppressed a
+// diagnostic. Start/End are the directive comment's own zero-based line and
+// UTF-16 code-unit columns.
+type Suppression struct {
+	Start Position
+	End   Position
+}
+
+// SuppressedDiagnostic pairs a diagnostic that an inline disable directive
+// suppressed with the directive responsible. The diagnostic stays out of
+// error/warning counts and the human-readable formats; machine formats can
+// render it as a suppression record.
+type SuppressedDiagnostic struct {
+	Diagnostic  Diagnostic
+	Suppression Suppression
 }
 
 // OutcomeKind is the CLI decision that drives the completed status line. The
@@ -137,6 +181,8 @@ type Counts struct {
 type Report struct {
 	mode        Mode
 	diagnostics []Diagnostic
+	suppressed  []SuppressedDiagnostic
+	rules       []RuleInfo
 	summary     Summary
 	hasSummary  bool
 	counts      Counts
@@ -149,6 +195,8 @@ type Report struct {
 func NewReport(
 	mode Mode,
 	diagnostics []Diagnostic,
+	suppressed []SuppressedDiagnostic,
+	rules []RuleInfo,
 	counts Counts,
 	summary *Summary,
 	outcome Outcome,
@@ -161,6 +209,8 @@ func NewReport(
 	return Report{
 		mode:        mode,
 		diagnostics: slices.Clone(diagnostics),
+		suppressed:  slices.Clone(suppressed),
+		rules:       slices.Clone(rules),
 		summary:     ownedSummary,
 		hasSummary:  hasSummary,
 		counts:      counts,
@@ -174,4 +224,15 @@ func (report Report) Counts() Counts {
 
 func (report Report) Outcome() Outcome {
 	return report.outcome
+}
+
+// SuppressedDiagnostics returns the diagnostics inline disable directives
+// suppressed, in the command-assigned (stable) order.
+func (report Report) SuppressedDiagnostics() []SuppressedDiagnostic {
+	return report.suppressed
+}
+
+// Rules returns the report's rule metadata in the command-assigned order.
+func (report Report) Rules() []RuleInfo {
+	return report.rules
 }

@@ -36,7 +36,7 @@ func newTestReportForMode(mode Mode, diagnostics []Diagnostic, typeErrors int, s
 	if counts.Errors > 0 {
 		outcome.Kind = OutcomeDiagnosticsFailed
 	}
-	return NewReport(mode, diagnostics, counts, &summary, outcome)
+	return NewReport(mode, diagnostics, nil, nil, counts, &summary, outcome)
 }
 
 func renderTest(dst io.Writer, report Report, outcome Outcome, options Options) error {
@@ -53,6 +53,7 @@ func TestParseFormat(t *testing.T) {
 		{"jsonline", FormatJSONLine},
 		{"github", FormatGitHub},
 		{"gitlab", FormatGitLab},
+		{"sarif", FormatSARIF},
 	}
 	for _, test := range tests {
 		got, err := ParseFormat(test.value)
@@ -76,7 +77,7 @@ func TestNewReportOwnsDiagnosticSnapshot(t *testing.T) {
 	}
 	diagnostics := []Diagnostic{{RuleName: "before", Source: source, Severity: SeverityError}}
 	counts := Counts{Errors: 1, LintErrors: 1}
-	report := NewReport(ModeLint, diagnostics, counts, &Summary{}, Outcome{Kind: OutcomeDiagnosticsFailed})
+	report := NewReport(ModeLint, diagnostics, nil, nil, counts, &Summary{}, Outcome{Kind: OutcomeDiagnosticsFailed})
 	lineStarts[0] = 1
 	diagnostics[0].Severity = SeverityWarning
 	diagnostics[0].RuleName = "after"
@@ -208,6 +209,8 @@ func renderDefaultLineBreakFixture(
 	report := NewReport(
 		ModeLint,
 		[]Diagnostic{diagnostic},
+		nil,
+		nil,
 		Counts{Errors: 1, LintErrors: 1},
 		&Summary{Files: 1, Rules: 1, Threads: 1},
 		Outcome{Kind: OutcomeDiagnosticsFailed},
@@ -787,7 +790,7 @@ func TestGitLabEmptyAndFingerprintCollisions(t *testing.T) {
 }
 
 func TestRenderDefaultRequiresSummary(t *testing.T) {
-	report := NewReport(ModeLint, nil, Counts{}, nil, Outcome{Kind: OutcomePassed})
+	report := NewReport(ModeLint, nil, nil, nil, Counts{}, nil, Outcome{Kind: OutcomePassed})
 	var rendered bytes.Buffer
 	if err := Render(&rendered, report, Options{Format: FormatDefault}); err == nil {
 		t.Fatal("default render accepted a diagnostics-only report")

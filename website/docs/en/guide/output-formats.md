@@ -96,3 +96,20 @@ lint:
     reports:
       codequality: gl-code-quality-report.json
 ```
+
+## sarif
+
+[SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html) JSON, the format consumed by code review and security platforms (for example GitHub code scanning and Azure DevOps SARIF viewers).
+
+```bash
+rslint --format sarif . > rslint.sarif
+```
+
+The report contains one run:
+
+- `tool.driver.rules` lists every rule that executed, each with its short description, `helpUri` documentation link, and `defaultConfiguration.level`. Rule indexes are sorted by rule id and stay stable across repeated runs.
+- Each `result` carries the file's artifact location, a region with real start/end lines and columns (including multi-line diagnostics), the `ruleId`/`ruleIndex`, SARIF `level`, and a stable SHA-256 `fingerprints.primaryFingerprint`. File URIs use forward slashes with percent-escaped path segments.
+- Diagnostics suppressed by inline `rslint-disable` / `eslint-disable` directives are still emitted as results carrying a `suppressions` entry of kind `inSource` that points at the directive comment, instead of disappearing.
+- Fixable diagnostics include a `fixes` object whose replacements carry the deleted UTF-8 byte region and inserted replacement text, even without `--fix`.
+
+Result order matches the other machine formats (file then start position).

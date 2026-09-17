@@ -13,6 +13,10 @@ type DiagnosticHandler = func(diagnostic rule.RuleDiagnostic)
 type LintResult struct {
 	LintedFileCount int32
 	ExecutedRules   map[string]struct{}
+	// ExecutedRuleSeverities is the strongest configured severity each
+	// executed rule ran with across files (error wins over warning). It is
+	// populated alongside ExecutedRules.
+	ExecutedRuleSeverities map[string]rule.DiagnosticSeverity
 }
 
 // PrepareLintPlanOptions configures exact lint-plan construction for an ordered

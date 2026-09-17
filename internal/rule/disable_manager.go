@@ -8,14 +8,6 @@ import (
 	"github.com/microsoft/TypeScript/tsc/shim/scanner"
 )
 
-// blockDirective represents a block-level disable or enable event at a source location
-type blockDirective struct {
-	line      int
-	column    core.UTF16Offset
-	isDisable bool     // true = disable, false = enable
-	rules     []string // nil means all rules (wildcard)
-}
-
 // directiveKind represents the type of an inline directive comment.
 type directiveKind int
 
@@ -26,6 +18,28 @@ const (
 	directiveLine                   // rslint-disable-line / eslint-disable-line
 	directiveNextLine               // rslint-disable-next-line / eslint-disable-next-line
 )
+
+// SuppressionKind identifies the inline directive form responsible for a
+// suppression.
+type SuppressionKind int
+
+const (
+	// SuppressionBlock is a rslint-disable/eslint-disable block directive.
+	SuppressionBlock SuppressionKind = iota
+	// SuppressionLine is a rslint-disable-line/eslint-disable-line directive.
+	SuppressionLine
+	// SuppressionNextLine is a rslint-disable-next-line/eslint-disable-next-line
+	// directive.
+	SuppressionNextLine
+)
+
+// DirectiveSuppression identifies the disable directive comment that
+// suppressed a diagnostic. CommentRange is the full comment trivia range
+// (including its // or /* */ markers) as a half-open UTF-8 byte interval.
+type DirectiveSuppression struct {
+	Kind         SuppressionKind
+	CommentRange core.TextRange
+}
 
 // directivePrefix defines the comment prefixes for disable/enable directives.
 type directivePrefix struct {
@@ -40,14 +54,23 @@ var directivePrefixes = []directivePrefix{
 	{"eslint-disable", "eslint-enable"},
 }
 
+// directiveRecord is one parsed disable/enable comment with its source
+// location. nil rules means the directive applies to every rule (wildcard).
+type directiveRecord struct {
+	kind   directiveKind
+	line   int
+	column core.UTF16Offset
+	start  int
+	end    int
+	rules  []string
+}
+
 // DisableManager tracks which rules are disabled at different locations in a file
 type DisableManager struct {
-	sourceFile            *ast.SourceFile
-	comments              *CommentStore
-	parsed                bool
-	blockDirectives       []blockDirective // block disable/enable events in source order
-	lineDisabledRules     map[int][]string // Rules disabled for specific lines
-	nextLineDisabledRules map[int][]string // Rules disabled for the next line
+	sourceFile *ast.SourceFile
+	comments   *CommentStore
+	parsed     bool
+	directives []directiveRecord
 }
 
 // NewDisableManager creates a manager whose directives are parsed on the first
@@ -117,42 +140,14 @@ func (dm *DisableManager) parseDirectives(comments []*ast.CommentRange) {
 		}
 
 		lineNum, columnNum := scanner.GetECMALineAndUTF16CharacterOfPosition(dm.sourceFile, comment.Pos())
-
-		switch kind {
-		case directiveLine:
-			if dm.lineDisabledRules == nil {
-				dm.lineDisabledRules = make(map[int][]string)
-			}
-			if len(rules) == 0 {
-				dm.lineDisabledRules[lineNum] = append(dm.lineDisabledRules[lineNum], "*")
-			} else {
-				dm.lineDisabledRules[lineNum] = append(dm.lineDisabledRules[lineNum], rules...)
-			}
-		case directiveNextLine:
-			nextLineNum := lineNum + 1
-			if dm.nextLineDisabledRules == nil {
-				dm.nextLineDisabledRules = make(map[int][]string)
-			}
-			if len(rules) == 0 {
-				dm.nextLineDisabledRules[nextLineNum] = append(dm.nextLineDisabledRules[nextLineNum], "*")
-			} else {
-				dm.nextLineDisabledRules[nextLineNum] = append(dm.nextLineDisabledRules[nextLineNum], rules...)
-			}
-		case directiveBlock:
-			dm.blockDirectives = append(dm.blockDirectives, blockDirective{
-				line:      lineNum,
-				column:    columnNum,
-				isDisable: true,
-				rules:     rules,
-			})
-		case directiveEnable:
-			dm.blockDirectives = append(dm.blockDirectives, blockDirective{
-				line:      lineNum,
-				column:    columnNum,
-				isDisable: false,
-				rules:     rules,
-			})
-		}
+		dm.directives = append(dm.directives, directiveRecord{
+			kind:   kind,
+			line:   lineNum,
+			column: columnNum,
+			start:  comment.Pos(),
+			end:    comment.End(),
+			rules:  rules,
+		})
 	}
 }
 
@@ -203,70 +198,120 @@ func parseRuleNames(rulesStr string) []string {
 
 // IsRuleDisabled checks if a rule is disabled at the given position
 func (dm *DisableManager) IsRuleDisabled(ruleName string, pos int) bool {
+	_, disabled := dm.Suppression(ruleName, pos)
+	return disabled
+}
+
+// Suppression returns the directive suppressing ruleName at pos when one
+// applies. The replay order and wildcard/specific precedence are identical to
+// IsRuleDisabled: block directives first (in source order), then same-line
+// directives, then next-line directives.
+func (dm *DisableManager) Suppression(ruleName string, pos int) (DirectiveSuppression, bool) {
 	if dm == nil || dm.sourceFile == nil {
-		return false
+		return DirectiveSuppression{}, false
 	}
 	dm.ensureParsed()
-	if len(dm.blockDirectives) == 0 && len(dm.lineDisabledRules) == 0 && len(dm.nextLineDisabledRules) == 0 {
-		return false
+	if len(dm.directives) == 0 {
+		return DirectiveSuppression{}, false
 	}
 
 	line, column := scanner.GetECMALineAndUTF16CharacterOfPosition(dm.sourceFile, pos)
 
-	// Check block disable/enable directives (range-based)
-	if dm.isBlockDisabled(ruleName, line, column) {
-		return true
+	if record, ok := dm.blockSuppression(ruleName, line, column); ok {
+		return DirectiveSuppression{
+			Kind:         SuppressionBlock,
+			CommentRange: core.NewTextRange(record.start, record.end),
+		}, true
 	}
 
-	// Check if rule is disabled for this specific line
-	if lineRules, exists := dm.lineDisabledRules[line]; exists {
-		for _, disabledRule := range lineRules {
-			if disabledRule == ruleName || disabledRule == "*" {
-				return true
-			}
-		}
+	if record, ok := dm.lineSuppression(ruleName, line, directiveLine); ok {
+		return DirectiveSuppression{
+			Kind:         SuppressionLine,
+			CommentRange: core.NewTextRange(record.start, record.end),
+		}, true
 	}
 
-	// Check if rule is disabled for this line via next-line directive
-	if nextLineRules, exists := dm.nextLineDisabledRules[line]; exists {
-		for _, disabledRule := range nextLineRules {
-			if disabledRule == ruleName || disabledRule == "*" {
-				return true
-			}
-		}
+	if record, ok := dm.lineSuppression(ruleName, line, directiveNextLine); ok {
+		return DirectiveSuppression{
+			Kind:         SuppressionNextLine,
+			CommentRange: core.NewTextRange(record.start, record.end),
+		}, true
 	}
 
-	return false
+	return DirectiveSuppression{}, false
 }
 
-// isBlockDisabled replays block directives in source order to determine
-// whether a rule is disabled at the given source location.
-func (dm *DisableManager) isBlockDisabled(ruleName string, line int, column core.UTF16Offset) bool {
+// blockSuppression replays block disable/enable directives in source order to
+// determine whether a rule is disabled at the given source location and, when
+// so, which directive decided it.
+func (dm *DisableManager) blockSuppression(ruleName string, line int, column core.UTF16Offset) (directiveRecord, bool) {
 	allDisabled := false
 	ruleDisabled := false
 	hasRuleSpecific := false
 
-	for _, d := range dm.blockDirectives {
+	var wildcardRecord directiveRecord
+	var ruleRecord directiveRecord
+
+	for _, d := range dm.directives {
+		if d.kind != directiveBlock && d.kind != directiveEnable {
+			continue
+		}
 		if d.line > line || (d.line == line && d.column > column) {
 			break
 		}
 
 		if len(d.rules) == 0 {
 			// Wildcard directive: affects all rules and resets rule-specific state
-			allDisabled = d.isDisable
+			allDisabled = d.kind == directiveBlock
 			hasRuleSpecific = false
+			wildcardRecord = d
 		} else {
 			for _, r := range d.rules {
 				if r == ruleName {
-					ruleDisabled = d.isDisable
+					ruleDisabled = d.kind == directiveBlock
 					hasRuleSpecific = true
+					ruleRecord = d
 				}
 			}
 		}
 	}
 
 	if hasRuleSpecific {
-		return ruleDisabled
+		return ruleRecord, ruleDisabled
 	}
-	return allDisabled
+	return wildcardRecord, allDisabled
+}
+
+// lineSuppression finds a same-line (directiveLine) or next-line
+// (directiveNextLine) directive applying to ruleName on line. When several
+// comments on the line qualify, a rule-specific directive is attributed in
+// preference to a wildcard one, matching the rule that a consumer should show.
+func (dm *DisableManager) lineSuppression(
+	ruleName string,
+	line int,
+	kind directiveKind,
+) (directiveRecord, bool) {
+	var wildcardRecord directiveRecord
+	hasWildcard := false
+	for _, d := range dm.directives {
+		if d.kind != kind || d.line != line {
+			continue
+		}
+		if len(d.rules) == 0 {
+			if !hasWildcard {
+				wildcardRecord = d
+				hasWildcard = true
+			}
+			continue
+		}
+		for _, r := range d.rules {
+			if r == ruleName {
+				return d, true
+			}
+		}
+	}
+	if hasWildcard {
+		return wildcardRecord, true
+	}
+	return directiveRecord{}, false
 }

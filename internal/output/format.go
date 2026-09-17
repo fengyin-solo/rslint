@@ -14,6 +14,7 @@ const (
 	FormatJSONLine
 	FormatGitHub
 	FormatGitLab
+	FormatSARIF
 )
 
 func ParseFormat(value string) (Format, error) {
@@ -26,8 +27,10 @@ func ParseFormat(value string) (Format, error) {
 		return FormatGitHub, nil
 	case "gitlab":
 		return FormatGitLab, nil
+	case "sarif":
+		return FormatSARIF, nil
 	default:
-		return FormatDefault, fmt.Errorf("invalid output format %q (expected default, jsonline, github, or gitlab)", value)
+		return FormatDefault, fmt.Errorf("invalid output format %q (expected default, jsonline, github, gitlab, or sarif)", value)
 	}
 }
 
@@ -41,6 +44,8 @@ func (f Format) String() string {
 		return "github"
 	case FormatGitLab:
 		return "gitlab"
+	case FormatSARIF:
+		return "sarif"
 	default:
 		return fmt.Sprintf("Format(%d)", f)
 	}

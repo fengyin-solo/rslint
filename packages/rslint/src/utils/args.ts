@@ -6,6 +6,7 @@ export const OUTPUT_FORMATS = [
   'jsonline',
   'github',
   'gitlab',
+  'sarif',
 ] as const;
 
 export type OutputFormat = (typeof OUTPUT_FORMATS)[number];

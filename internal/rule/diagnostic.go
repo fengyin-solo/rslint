@@ -102,3 +102,12 @@ func (d RuleDiagnostic) Fixes() []RuleFix {
 	}
 	return *d.FixesPtr
 }
+
+// SuppressedDiagnostic pairs a diagnostic that an inline disable directive
+// suppressed with the directive responsible. The linter only produces these
+// when the consumer opts in through DiagnosticConsumer.ReportSuppression;
+// ordinary consumers keep receiving just the visible diagnostics.
+type SuppressedDiagnostic struct {
+	Diagnostic RuleDiagnostic
+	Directive  DirectiveSuppression
+}

@@ -34,6 +34,11 @@ func (d EditDemand) IsValid() bool {
 type DiagnosticConsumer struct {
 	Demand EditDemand
 	Report func(RuleDiagnostic)
+	// ReportSuppression, when set, receives a diagnostic that an inline
+	// disable directive suppressed instead of letting it disappear. It is
+	// presentation-only data: it never changes which diagnostics Report
+	// receives or fix application.
+	ReportSuppression func(SuppressedDiagnostic)
 }
 
 type RuleContext struct {
@@ -180,10 +185,34 @@ func (ctx *RuleContext) requireReporter() {
 	}
 }
 
-// shouldReportRange assumes requireReporter has already run.
-func (ctx *RuleContext) shouldReportRange(textRange core.TextRange) bool {
+// suppressionForRange assumes requireReporter has already run. It returns the
+// inline directive suppressing the range when one applies.
+func (ctx *RuleContext) suppressionForRange(textRange core.TextRange) (DirectiveSuppression, bool) {
 	reporter := &ctx.reporter
-	return !ctx.DisableManager.IsRuleDisabled(reporter.ruleName, textRange.Pos())
+	return ctx.DisableManager.Suppression(reporter.ruleName, textRange.Pos())
+}
+
+// emitSuppression forwards a suppressed diagnostic to the consumer's
+// suppression sink when one is installed. The diagnostic carries no edit
+// artifacts, matching the fact that suppressed findings never participate in
+// autofix.
+func (ctx *RuleContext) emitSuppression(textRange core.TextRange, msg RuleMessage, directive DirectiveSuppression) {
+	reporter := &ctx.reporter
+	reportSuppression := reporter.consumer.ReportSuppression
+	if reportSuppression == nil {
+		return
+	}
+	reportSuppression(SuppressedDiagnostic{
+		Diagnostic: RuleDiagnostic{
+			RuleName:   reporter.ruleName,
+			Range:      textRange,
+			Message:    msg,
+			SourceFile: ctx.SourceFile,
+			FilePath:   ctx.SourceFile.FileName(),
+			Severity:   reporter.severity,
+		},
+		Directive: directive,
+	})
 }
 
 func (ctx *RuleContext) emitRange(textRange core.TextRange, msg RuleMessage, fixes *[]RuleFix, suggestions *[]RuleSuggestion) {
@@ -225,7 +254,8 @@ func (ctx *RuleContext) emitRangeWithFixesAndSuggestions(
 // the public methods makes node reports fail consistently before touching a
 // nil SourceFile while paying only one reporter check per diagnostic.
 func (ctx *RuleContext) reportRange(textRange core.TextRange, msg RuleMessage, fixes *[]RuleFix, suggestions *[]RuleSuggestion) {
-	if !ctx.shouldReportRange(textRange) {
+	if suppression, suppressed := ctx.suppressionForRange(textRange); suppressed {
+		ctx.emitSuppression(textRange, msg, suppression)
 		return
 	}
 	if ctx.reporter.consumer.Demand&EditDemandAutofix == 0 {
@@ -238,7 +268,8 @@ func (ctx *RuleContext) reportRange(textRange core.TextRange, msg RuleMessage, f
 }
 
 func (ctx *RuleContext) reportRangeWithDeferredFixes(textRange core.TextRange, msg RuleMessage, build func() []RuleFix) {
-	if !ctx.shouldReportRange(textRange) {
+	if suppression, suppressed := ctx.suppressionForRange(textRange); suppressed {
+		ctx.emitSuppression(textRange, msg, suppression)
 		return
 	}
 
@@ -253,7 +284,8 @@ func (ctx *RuleContext) reportRangeWithDeferredFixes(textRange core.TextRange, m
 }
 
 func (ctx *RuleContext) reportRangeWithDeferredSuggestions(textRange core.TextRange, msg RuleMessage, build func() []RuleSuggestion) {
-	if !ctx.shouldReportRange(textRange) {
+	if suppression, suppressed := ctx.suppressionForRange(textRange); suppressed {
+		ctx.emitSuppression(textRange, msg, suppression)
 		return
 	}
 
@@ -273,7 +305,8 @@ func (ctx *RuleContext) reportRangeWithDeferredFixesAndSuggestions(
 	buildFixes func() []RuleFix,
 	buildSuggestions func() []RuleSuggestion,
 ) {
-	if !ctx.shouldReportRange(textRange) {
+	if suppression, suppressed := ctx.suppressionForRange(textRange); suppressed {
+		ctx.emitSuppression(textRange, msg, suppression)
 		return
 	}
 

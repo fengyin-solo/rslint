@@ -14,7 +14,10 @@ import (
 // Integrations supply generation and transport behavior only through the sealed
 // request's ports.
 func RunPipeline(ctx context.Context, request PipelineRequest) (PipelineResult, error) {
-	result := PipelineResult{executedRules: make(map[string]struct{})}
+	result := PipelineResult{
+		executedRules:          make(map[string]struct{}),
+		executedRuleSeverities: make(map[string]rule.DiagnosticSeverity),
+	}
 	if ctx == nil {
 		return result, errors.New("linter pipeline: context must not be nil")
 	}
@@ -90,6 +93,9 @@ func mergeSuccessfulExecution(result *PipelineResult, execution observationExecu
 	if lintResult := execution.observation.Native.Lint; lintResult != nil {
 		for name := range lintResult.ExecutedRules {
 			result.executedRules[name] = struct{}{}
+		}
+		for name, severity := range lintResult.ExecutedRuleSeverities {
+			mergeExecutedRuleSeverity(result.executedRuleSeverities, name, severity)
 		}
 	}
 }

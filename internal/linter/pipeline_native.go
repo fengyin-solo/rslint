@@ -27,6 +27,7 @@ func runNativeObservation(
 	if plan != nil {
 		diagnostics = plan.SyntacticDiagnostics(generation.Native.TypeCheck)
 	}
+	var suppressedDiagnostics []rule.SuppressedDiagnostic
 	runOptions := generation.runLinterOptions(plan)
 	consumer := rule.DiagnosticConsumer{Demand: demand}
 	var diagnosticsWait sync.WaitGroup
@@ -35,20 +36,34 @@ func runNativeObservation(
 		consumer.Report = func(diagnostic rule.RuleDiagnostic) {
 			diagnostics = append(diagnostics, diagnostic)
 		}
+		consumer.ReportSuppression = func(suppressed rule.SuppressedDiagnostic) {
+			suppressedDiagnostics = append(suppressedDiagnostics, suppressed)
+		}
 	} else {
 		diagnosticsChannel := make(chan rule.RuleDiagnostic, 4096)
-		diagnosticsWait.Add(1)
+		suppressedChannel := make(chan rule.SuppressedDiagnostic, 4096)
+		diagnosticsWait.Add(2)
 		go func() {
 			defer diagnosticsWait.Done()
 			for diagnostic := range diagnosticsChannel {
 				diagnostics = append(diagnostics, diagnostic)
 			}
 		}()
+		go func() {
+			defer diagnosticsWait.Done()
+			for suppressed := range suppressedChannel {
+				suppressedDiagnostics = append(suppressedDiagnostics, suppressed)
+			}
+		}()
 		consumer.Report = func(diagnostic rule.RuleDiagnostic) {
 			diagnosticsChannel <- diagnostic
 		}
+		consumer.ReportSuppression = func(suppressed rule.SuppressedDiagnostic) {
+			suppressedChannel <- suppressed
+		}
 		finishDiagnostics = func() {
 			close(diagnosticsChannel)
+			close(suppressedChannel)
 			diagnosticsWait.Wait()
 		}
 	}
@@ -62,8 +77,12 @@ func runNativeObservation(
 	for index := range diagnostics {
 		diagnostics[index].FilePath = projectTargetPath(generation.Target.Path, diagnostics[index].FilePath)
 	}
+	for index := range suppressedDiagnostics {
+		suppressedDiagnostics[index].Diagnostic.FilePath = projectTargetPath(generation.Target.Path, suppressedDiagnostics[index].Diagnostic.FilePath)
+	}
 	result := NativeObservation{
 		Diagnostics:           diagnostics,
+		SuppressedDiagnostics: suppressedDiagnostics,
 		Lint:                  lintResult,
 		Files:                 lintedFiles,
 		HasTargetSyntaxErrors: plan != nil && plan.HasSyntacticDiagnostics(),

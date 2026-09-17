@@ -16,6 +16,7 @@ import (
 	"github.com/microsoft/TypeScript/tsc/shim/vfs"
 	"github.com/microsoft/TypeScript/tsc/shim/vfs/cachedvfs"
 	"github.com/microsoft/TypeScript/tsc/shim/vfs/osvfs"
+	"github.com/web-infra-dev/rslint/internal/api"
 	rslintconfig "github.com/web-infra-dev/rslint/internal/config"
 	configLint "github.com/web-infra-dev/rslint/internal/config/lint"
 	"github.com/web-infra-dev/rslint/internal/config/target"
@@ -276,6 +277,7 @@ func handleLintCommand(args lintArgs, ctx context.Context, dispatch linter.Eslin
 		Format:       format,
 		Quiet:        quiet,
 		ColorEnabled: colorEnabled,
+		ToolVersion:  api.Version,
 	}
 	startWriter := args.StartWriter
 	if startWriter == nil {
@@ -538,6 +540,11 @@ func handleLintCommand(args lintArgs, ctx context.Context, dispatch linter.Eslin
 	if fix {
 		demand.Native = rule.EditDemandAutofix
 		demand.Plugin = rule.EditDemandAll
+	} else if format == output.FormatSARIF {
+		// SARIF reports offered replacements without applying them, so the
+		// observation must materialize autofix artifacts even without --fix.
+		demand.Native = rule.EditDemandAutofix
+		demand.Plugin = rule.EditDemandAutofix
 	}
 	observationPolicy := linter.ObservationPolicy{
 		Demand:        demand,
@@ -583,6 +590,12 @@ func handleLintCommand(args lintArgs, ctx context.Context, dispatch linter.Eslin
 		const reason = "CLI lint returned an incomplete observation"
 		return abortRun(reason, "error running linter: "+reason)
 	}
+	allSuppressed, suppressedComplete := pipelineResult.Observation.CompleteSuppressedDiagnostics()
+	if !suppressedComplete {
+		const reason = "CLI lint returned an incomplete suppression observation"
+		return abortRun(reason, "error running linter: "+reason)
+	}
+	ruleSeverities := pipelineResult.ExecutedRuleSeverities()
 	lintResult := pipelineResult.Observation.Native.Lint
 	initialObservation := pipelineResult.Observation
 	fixedCount := 0
@@ -607,7 +620,10 @@ func handleLintCommand(args lintArgs, ctx context.Context, dispatch linter.Eslin
 		}
 	}
 	scopeRestricted := len(allowFiles) > 0 || len(allowDirs) > 0
-	if format != output.FormatDefault && shouldShortCircuitMachineOutput(typeCheckOnly, typeCheck, scopeRestricted, lintedfileCount) {
+	// SARIF is a single JSON document: even a run with no diagnostics must
+	// still render the complete envelope and rule list, so it does not take
+	// the diagnostics-only short circuit.
+	if format != output.FormatDefault && format != output.FormatSARIF && shouldShortCircuitMachineOutput(typeCheckOnly, typeCheck, scopeRestricted, lintedfileCount) {
 		return 0
 	}
 
@@ -645,6 +661,8 @@ func handleLintCommand(args lintArgs, ctx context.Context, dispatch linter.Eslin
 	report, err := assembleLintReport(lintReportInput{
 		Mode:          mode,
 		Diagnostics:   allDiags,
+		Suppressed:    allSuppressed,
+		RuleSeverity:  ruleSeverities,
 		Summary:       summary,
 		MaxWarnings:   maxWarnings,
 		IncludeSource: format == output.FormatDefault,

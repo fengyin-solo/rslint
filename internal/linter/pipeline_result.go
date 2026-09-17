@@ -16,8 +16,9 @@ type LintedFile struct {
 // NativeObservation is the complete native result for one generation and its
 // requested ArtifactDemand.
 type NativeObservation struct {
-	Diagnostics []rule.RuleDiagnostic
-	Lint        *LintResult
+	Diagnostics           []rule.RuleDiagnostic
+	SuppressedDiagnostics []rule.SuppressedDiagnostic
+	Lint                  *LintResult
 	// Files is populated only when ArtifactDemand.LintedFiles is requested.
 	Files                 []LintedFile
 	HasTargetSyntaxErrors bool
@@ -53,6 +54,17 @@ func (r ObservationResult) CompleteDiagnostics() ([]rule.RuleDiagnostic, bool) {
 		diagnostics = append(diagnostics, r.pluginOutcome.Diagnostics...)
 	}
 	return diagnostics, true
+}
+
+// CompleteSuppressedDiagnostics returns the diagnostics inline disable
+// directives suppressed when production is complete. The boolean mirrors
+// CompleteDiagnostics. Plugin workers own suppression inside ESLint and do
+// not report suppressed findings, so only native observations contribute.
+func (r ObservationResult) CompleteSuppressedDiagnostics() ([]rule.SuppressedDiagnostic, bool) {
+	if r.pluginKind == pluginObservationProgressive {
+		return nil, false
+	}
+	return append([]rule.SuppressedDiagnostic(nil), r.Native.SuppressedDiagnostics...), true
 }
 
 // JoinedPluginOutcome returns the structured result for joined plugin work.
@@ -147,8 +159,9 @@ type PipelineResult struct {
 	Observation ObservationResult
 	fix         fixResult
 
-	executedRules  map[string]struct{}
-	pluginOutcomes []PluginDispatchRecord
+	executedRules          map[string]struct{}
+	executedRuleSeverities map[string]rule.DiagnosticSeverity
+	pluginOutcomes         []PluginDispatchRecord
 }
 
 // AppliedFixes returns the bounded autofix history with PipelineResult's own
@@ -163,6 +176,16 @@ func (r PipelineResult) ExecutedRules() map[string]struct{} {
 	result := make(map[string]struct{}, len(r.executedRules))
 	for name := range r.executedRules {
 		result[name] = struct{}{}
+	}
+	return result
+}
+
+// ExecutedRuleSeverities returns the union of native executed rules with the
+// strongest configured severity each ran with across observations.
+func (r PipelineResult) ExecutedRuleSeverities() map[string]rule.DiagnosticSeverity {
+	result := make(map[string]rule.DiagnosticSeverity, len(r.executedRuleSeverities))
+	for name, severity := range r.executedRuleSeverities {
+		result[name] = severity
 	}
 	return result
 }

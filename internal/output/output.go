@@ -15,6 +15,9 @@ type Options struct {
 	ComparePaths tspath.ComparePathsOptions
 	Quiet        bool
 	ColorEnabled bool
+	// ToolVersion is rendered in machine formats that identify the tool
+	// itself (SARIF's tool.driver.version). Empty means omit it.
+	ToolVersion string
 }
 
 type formatter interface {
@@ -87,6 +90,8 @@ func newFormatter(options Options) (formatter, error) {
 		return githubFormatter{}, nil
 	case FormatGitLab:
 		return newGitLabFormatter(), nil
+	case FormatSARIF:
+		return newSARIFFormatter(options.ToolVersion, options.ComparePaths), nil
 	default:
 		return nil, errors.New("unsupported output format " + options.Format.String())
 	}

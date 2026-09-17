@@ -63,8 +63,22 @@ func checkerFreeLintWorkerCount(fileCount int, maxWorkers int) int {
 }
 
 type programLintResult struct {
-	lintedFileCount int32
-	executedRules   map[string]struct{}
+	lintedFileCount        int32
+	executedRules          map[string]struct{}
+	executedRuleSeverities map[string]rule.DiagnosticSeverity
+}
+
+// mergeExecutedRuleSeverity records the strongest configured severity a rule
+// ran with across files. DiagnosticSeverity orders error < warning < off, so
+// the smaller value wins.
+func mergeExecutedRuleSeverity(
+	target map[string]rule.DiagnosticSeverity,
+	name string,
+	severity rule.DiagnosticSeverity,
+) {
+	if existing, ok := target[name]; !ok || severity < existing {
+		target[name] = severity
+	}
 }
 
 type listenerRegistry struct {
@@ -366,8 +380,12 @@ func runLintRulesInProgram(plan *programLintPlan, opts programRunOptions, consum
 			if result.executedRules == nil {
 				result.executedRules = make(map[string]struct{}, len(rules))
 			}
+			if result.executedRuleSeverities == nil {
+				result.executedRuleSeverities = make(map[string]rule.DiagnosticSeverity, len(rules))
+			}
 			for _, configuredRule := range rules {
 				result.executedRules[configuredRule.Name] = struct{}{}
+				mergeExecutedRuleSeverity(result.executedRuleSeverities, configuredRule.Name, configuredRule.Severity)
 			}
 		}
 		rules = filterNativeRules(rules)
@@ -499,6 +517,7 @@ func RunLinter(opts RunLinterOptions) (*LintResult, error) {
 	}
 
 	executedRules := make(map[string]struct{})
+	executedRuleSeverities := make(map[string]rule.DiagnosticSeverity)
 	var lintedFileCount int32
 
 	// Phase 1: lint rules per Program (parallel). Skipped when no plan was
@@ -525,6 +544,9 @@ func RunLinter(opts RunLinterOptions) (*LintResult, error) {
 			for name := range programResult.executedRules {
 				executedRules[name] = struct{}{}
 			}
+			for name, severity := range programResult.executedRuleSeverities {
+				mergeExecutedRuleSeverity(executedRuleSeverities, name, severity)
+			}
 		}
 		for _, programResult := range programResults {
 			mergeResult(programResult)
@@ -541,8 +563,9 @@ func RunLinter(opts RunLinterOptions) (*LintResult, error) {
 	}
 
 	return &LintResult{
-		LintedFileCount: lintedFileCount,
-		ExecutedRules:   executedRules,
+		LintedFileCount:        lintedFileCount,
+		ExecutedRules:          executedRules,
+		ExecutedRuleSeverities: executedRuleSeverities,
 	}, nil
 }
 

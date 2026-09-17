@@ -46,7 +46,7 @@ describe('isJSConfigFile', () => {
 
 describe('isOutputFormat', () => {
   test('accepts every CLI output protocol', () => {
-    for (const format of ['default', 'jsonline', 'github', 'gitlab']) {
+    for (const format of ['default', 'jsonline', 'github', 'gitlab', 'sarif']) {
       expect(isOutputFormat(format)).toBe(true);
     }
   });
